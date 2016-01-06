@@ -1,23 +1,24 @@
 # -*- coding: utf-8 -*-
 
-import requests
-import urllib.parse
-import simplejson as json
-import re
-import os
-import zipfile
-import urllib.request
-import os.path
-import mimetypes
-import time
-import urllib.parse
 import cgi
+import mimetypes
+import os
+import os.path
+import re
+import ssl
 import time
+import urllib.parse
+import urllib.parse
+import urllib.request
+import zipfile
+from multiprocessing import Process, Queue
+
+import requests
+import simplejson as json
+from bs4 import BeautifulSoup
 from readability.readability import Document
-from bs4 import BeautifulSoup, Tag
-from multiprocessing import Process, Pipe, Queue
 
-
+count = 0
 class MyZipFile(zipfile.ZipFile):
     def writestr(self, name, s, compress=zipfile.ZIP_DEFLATED):
         zipinfo = zipfile.ZipInfo(name, time.localtime(time.time())[:6])
@@ -25,28 +26,70 @@ class MyZipFile(zipfile.ZipFile):
         zipfile.ZipFile.writestr(self, zipinfo, s)
 
 
-def dlimg(path, str):
-    str.put(urllib.request.urlopen(path).read())
+def dl(image, url, anum, inum, q):
+    try:
+        abspath = urllib.parse.urljoin(url, image)
+        path = urllib.parse.urlunsplit(urllib.parse.urlsplit(abspath)[:3] + ('', '',))
+        imgfile = os.path.basename(path)
+        filename = 'article_{}_image_{}{}'.format(anum, inum, os.path.splitext(imgfile)[1])
+
+        if '.jpg' in abspath.lower():
+            filename += '.jpg'
+        elif '.png' in abspath.lower():
+            filename += '.png'
+        elif '.bmp' in abspath.lower():
+            filename += '.bmp'
+        elif '.gif' in abspath.lower():
+            filename += '.gif'
+        elif '.img' in abspath.lower():
+            filename += '.img'
+
+        q.put_nowait(filename)
+        print("Downloading image: {} {}".format(inum, filename))
+        if path.lower().startswith('http'):
+            print('Downloading {}...'.format(abspath))
+            str = urllib.request.urlopen(abspath).read()
+            print('Download completed. Inserting into Queue...')
+            q.put_nowait(str)
+            print('Insert completed.')
+            return
+    except urllib.error.HTTPError as e:
+        print(e)
+        q.put_nowait(NotFoundImage)
+    except urllib.error.URLError as e1:
+        print(e1)
+        q.put_nowait(NotFoundImage)
+    except ssl.SSLError as e2:
+        print(e2)
+        q.put_nowait(NotFoundImage)
     return
 
 
-def getimg(path1, path2):
+def getimg(image, url, anum, inum):
+    global count
     if __name__ == '__main__':
-        qstr1 = Queue()
-        qstr2 = Queue()
-        p1 = Process(target=dlimg, args=(path1, qstr1))
-        p2 = Process(target=dlimg, args=(path2, qstr2))
+        q = list()
+        p = list()
+        img = list()
+        filename = list()
+        for i in range(len(image)):
+            q.append(Queue())
+            p.append(Process(target=dl, args=(image[i], url, anum, inum + i, q[i])))
 
-        p1.start()
-        p2.start()
+        for j in range(len(p)):
+            p[j].start()
 
-        p1.join()
-        p2.join()
+        for k in range(len(q)):
+            filename.append(q[k].get())
+            img.append(q[k].get())
+        for l in range(len(p)):
+            p[l].join()
 
-        img1 = qstr1.get()
-        img2 = qstr2.get()
-        return [img1, img2]
+        if len(img) == 1: img = img[0]
+        if len(filename) == 1: filename = filename[0]
 
+        count += 1
+        return [filename, img]
 
 def getURL(post, bID):
     postNo = list()
@@ -216,7 +259,7 @@ def buildEpub(bookTitle, bookAuthor, bookPublisher, blogURL, count, postNo):
         toc += '<navPoint id="navpoint-{}" playOrder="{}"> <navLabel> <text>{}</text> </navLabel> <content src="article_{}.html"/> </navPoint>'.format(
                 i + 2, i + 2, cgi.escape(readable_title), i + 1)
 
-        soup = BeautifulSoup(readable_article)
+        soup = BeautifulSoup(readable_article, 'lxml')
         # Add xml namespace
         soup.html["xmlns"] = "http://www.w3.org/1999/xhtml"
         # Insert header
@@ -236,34 +279,33 @@ def buildEpub(bookTitle, bookAuthor, bookPublisher, blogURL, count, postNo):
         head.insert(1, article_title)
 
         # Download images
-        for j, image in enumerate(soup.findAll('img')):
+        image = soup.findAll('img')
+        end = len(image)
+        print(end)
+        for j in range(0, end, 2):
             try:
-                # Convert relative urls to absolute urls
-                imgabspath = [urllib.parse.urljoin(url, image["src"]),
-                              urllib.parse.urljoin(url, image["src"])]
-                # Remove query strings from url
-                imgpath = [urllib.parse.urlunsplit(urllib.parse.urlsplit(imgabspath[0])[:3] + ('', '',)),
-                           urllib.parse.urlunsplit(urllib.parse.urlsplit(imgabspath[1])[:3] + ('', '',))]
-                print("Downloading image: {:s} {:s}".format(str(j + 1), imgpath[0]))
-                print("Downloading image: {:s} {:s}".format(str(j + 2), imgpath[1]))
-                imgfile = [os.path.basename(imgpath[0]),
-                           os.path.basename(imgpath[1])]
-                filename = [
-                    'article_{:s}_image_{:s}{:s}'.format(str(i + 1), str(j + 1), os.path.splitext(imgfile[0])[1]),
-                    'article_{:s}_image_{:s}{:s}'.format(str(i + 1), str(j + 2), os.path.splitext(imgfile[1])[1])]
-                if imgpath[0].lower().startswith("http") and imgpath[1].lower().startswith("http"):
-                    img = getimg(imgabspath[0], imgabspath[1])
-                    epub.writestr('OEBPS/images/' + filename[0], img[0])
-                    epub.writestr('OEBPS/images/' + filename[1], img[1])
-
-                    image['src'] = 'images/' + filename[0]
+                if (end - j) == 1 and end % 2 == 1:
+                    result = getimg([image[j]['src']], url, i, j + 2)
+                    filename = result[0]
+                    img = result[1]
+                    epub.writestr('OEBPS/images/' + filename, img)
                     manifest += '<item id="article_{:s}_image_{:s}" href="images/{:s}" media-type="{:s}"/>\n'.format(
+                            str(i + 1), str(j + 3), filename, str(mimetypes.guess_type(filename)[0]))
+                    break
+                print(j)
+                result = getimg([image[j]['src'], image[j + 1]['src']], url, i, j)
+                filename = result[0]
+                img = result[1]
+                epub.writestr('OEBPS/images/' + filename[0], img[0])
+                epub.writestr('OEBPS/images/' + filename[1], img[1])
+                manifest += '<item id="article_{:s}_image_{:s}" href="images/{:s}" media-type="{:s}"/>\n'.format(
                             str(i + 1), str(j + 1), filename[0], str(mimetypes.guess_type(filename[0])[0]))
-                    manifest += '<item id="article_{:s}_image_{:s}" href="images/{:s}" media-type="{:s}"/>\n'.format(
+                manifest += '<item id="article_{:s}_image_{:s}" href="images/{:s}" media-type="{:s}"/>\n'.format(
                             str(i + 1), str(j + 2), filename[1], str(mimetypes.guess_type(filename[1])[0]))
-                j += 1
+
             except urllib.error.HTTPError as e:
                 print(e)
+
         epub.writestr('OEBPS/article_{:s}.html'.format(str(i + 1)), str(soup))
     info['manifest'] = manifest
     info['spine'] = spine
@@ -275,6 +317,9 @@ def buildEpub(bookTitle, bookAuthor, bookPublisher, blogURL, count, postNo):
     epub.writestr('OEBPS/toc.ncx', toc_tpl % info)
 
 
+print('Downloading essential file(s)...')
+NotFoundImage = urllib.request.urlopen(
+        "http://learn.getgrav.org/user/pages/09.troubleshooting/01.page-not-found/error-404.png").read()
 postCount = input("Total post count : ")
 blogID = str(input("Blog ID : "))
 title = str(input("Book Title (default: Blog ID) : "))
@@ -296,6 +341,7 @@ postNo = getURL(postCount, blogID)
 if not os.path.exists(ID) :
 	os.makedirs(ID)
 '''
-
+s_time = time.time()
 URL = 'http://m.blog.naver.com/{:s}'.format(blogID)
 buildEpub(title, postAuthor, postPublisher, URL, postCount, postNo)
+print('Build completed. Elapsed time : {} sec. {} images downloaded.'.format(time.time() - s_time, count))
